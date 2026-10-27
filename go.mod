@@ -1,6 +1,6 @@
 module github.com/ourstudio-se/mangrove-go
 
-go 1.26.9
+go 1.25
 
 require (
 	github.com/99designs/gqlgen v0.17.88
