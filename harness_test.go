@@ -104,7 +104,10 @@ type harnessOptions struct {
 	now        func() time.Time
 	// noValidate executes documents without validating them, to see what
 	// non-validating executors would do.
-	noValidate bool
+	noValidate        bool
+	shouldCacheResult mangrove.ShouldCacheResultFunc
+	// metadata disables the cache metadata extension when false.
+	noMetadata bool
 }
 
 type harness struct {
@@ -153,7 +156,8 @@ func newHarness(t testing.TB, options harnessOptions) *harness {
 		Session:                  func(context.Context) string { return "session" },
 		Enabled:                  options.enabled,
 		AwaitWriteBeforeResponse: true,
-		IncludeExtensionMetadata: true,
+		IncludeExtensionMetadata: !options.noMetadata,
+		ShouldCacheResult:        options.shouldCacheResult,
 		Logger:                   logger,
 	})
 	if err != nil {
