@@ -64,11 +64,11 @@ func isMarkerKey(key string) bool {
 // getMarkedID returns the entity id carried by an object's id markers, as a
 // string.
 func getMarkedID(value *Object) (string, bool) {
-	for _, key := range value.Keys() {
-		if !isIDMarkerKey(key) {
+	for _, f := range value.fields {
+		if !isIDMarkerKey(f.key) {
 			continue
 		}
-		switch id := value.values[key].(type) {
+		switch id := f.value.(type) {
 		case string:
 			return id, true
 		case json.Number:
@@ -79,7 +79,7 @@ func getMarkedID(value *Object) (string, bool) {
 }
 
 func getMarkedTypename(value *Object) (string, bool) {
-	typename, ok := value.values[AliasEntityCacheTypename].(string)
+	typename, ok := value.value(AliasEntityCacheTypename).(string)
 	if !ok || typename == "" {
 		return "", false
 	}

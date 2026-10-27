@@ -194,12 +194,12 @@ func cleanupData(value any) any {
 		if v == nil {
 			return v
 		}
-		out := NewObject(len(v.keys))
-		for _, key := range v.keys {
-			if isMarkerKey(key) {
+		out := NewObject(len(v.fields))
+		for _, f := range v.fields {
+			if isMarkerKey(f.key) {
 				continue
 			}
-			out.Set(key, cleanupData(v.values[key]))
+			out.fields = append(out.fields, field{key: f.key, value: cleanupData(f.value)})
 		}
 		return out
 	default:
@@ -426,11 +426,11 @@ func collectEntityRecords(data any, collect CollectEntityFunc) []EntityWithLocat
 				basePath = record.Path
 			}
 
-			for _, key := range v.keys {
-				if isMarkerKey(key) {
+			for _, f := range v.fields {
+				if isMarkerKey(f.key) {
 					continue
 				}
-				walk(v.values[key], appendPath(basePath, PathPart{Field: key}))
+				walk(f.value, appendPath(basePath, PathPart{Field: f.key}))
 			}
 		}
 	}
@@ -475,9 +475,9 @@ func collectOpaqueCoordinates(data any) []string {
 					found = append(found, coordinates)
 				}
 			}
-			for _, key := range v.keys {
-				if !isMarkerKey(key) {
-					walk(v.values[key], coordinates+"."+key, false)
+			for _, f := range v.fields {
+				if !isMarkerKey(f.key) {
+					walk(f.value, coordinates+"."+f.key, false)
 				}
 			}
 		}

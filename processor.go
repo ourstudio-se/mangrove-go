@@ -51,11 +51,15 @@ type processResultParams struct {
 }
 
 type processedResult struct {
+	// raw is the result with marker fields, nil for a result without data.
+	raw *Object
+	// data is the result without marker fields.
+	data              *Object
+	collect           CollectEntityFunc
+	collected         bool
 	collectedEntities []EntityWithLocation
-	// data is nil for a result without data.
-	data       *Object
-	errors     gqlerror.List
-	extensions map[string]any
+	errors            gqlerror.List
+	extensions        map[string]any
 }
 
 type resultProcessor struct {
@@ -81,12 +85,23 @@ func (p *resultProcessor) process(ctx context.Context, params processResultParam
 	// Nothing to merge into: a plain execution result is used as is.
 	isPlainExecution := params.cachedResult == nil && len(params.nextResults) == 1
 
+	// A pure cache hit has nothing new to store.
+	isPureHit := params.cachedResult != nil && len(params.nextResults) == 0
+
 	var mergedData *Object
-	if isPlainExecution {
+	switch {
+	case isPlainExecution:
 		mergedData = params.nextResults[0].data
-	} else if params.cachedResult != nil && params.cachedResult.Data != nil {
-		mergedData = cloneObject(params.cachedResult.Data)
-	} else {
+	case params.cachedResult != nil && params.cachedResult.Data != nil:
+		if isPureHit {
+			// Nothing is merged into it.
+			mergedData = params.cachedResult.Data
+		} else {
+			// The merge context's snapshots refer to the cached data, which
+			// must stay as it was read.
+			mergedData = cloneObject(params.cachedResult.Data)
+		}
+	default:
 		mergedData = NewObject(0)
 	}
 
@@ -120,16 +135,11 @@ func (p *resultProcessor) process(ctx context.Context, params processResultParam
 
 	stored := &CachedResult{Data: mergedData, Errors: mergedErrors}
 
-	var collected []EntityWithLocation
-	if mergedData != nil {
-		collected = collectEntityRecords(mergedData, p.collectEntity)
-	}
+	processed := &processedResult{raw: mergedData, collect: p.collectEntity, errors: mergedErrors, extensions: extensions}
 
-	// A pure cache hit has nothing new to store. A result without data has
-	// nothing to store either.
-	isPureHit := params.cachedResult != nil && len(params.nextResults) == 0
-
+	// A result without data has nothing to store.
 	if !isPureHit && mergedData != nil && p.shouldCacheResult(params.cacheKey, stored) {
+		collected := processed.entities()
 		storeParams := StoreParams{
 			CacheKey:               params.cacheKey,
 			CacheState:             params.cacheState,
@@ -153,15 +163,19 @@ func (p *resultProcessor) process(ctx context.Context, params processResultParam
 		}
 	}
 
-	var data *Object
 	if mergedData != nil {
-		data = cleanupData(mergedData).(*Object)
+		processed.data = cleanupData(mergedData).(*Object)
 	}
 
-	return &processedResult{
-		collectedEntities: collected,
-		data:              data,
-		errors:            mergedErrors,
-		extensions:        extensions,
-	}, nil
+	return processed, nil
+}
+
+// entities returns the entities in the result, collecting them on first
+// use.
+func (p *processedResult) entities() []EntityWithLocation {
+	if !p.collected && p.raw != nil {
+		p.collectedEntities = collectEntityRecords(p.raw, p.collect)
+	}
+	p.collected = true
+	return p.collectedEntities
 }

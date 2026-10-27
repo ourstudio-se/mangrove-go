@@ -45,8 +45,8 @@ func isLinkStub(value any) bool {
 	if _, ok := getEntityIdentity(object); !ok {
 		return false
 	}
-	for _, key := range object.keys {
-		if !isMarkerKey(key) {
+	for _, f := range object.fields {
+		if !isMarkerKey(f.key) {
 			return false
 		}
 	}
@@ -114,8 +114,8 @@ func (s *entitySnapshots) index(data any, coordinates string) {
 		if identity, ok := getEntityIdentity(v); ok && !s.has(coordinates, identity) {
 			s.set(coordinates, identity, v)
 		}
-		for _, key := range v.keys {
-			s.index(v.values[key], coordinates+"."+key)
+		for _, f := range v.fields {
+			s.index(f.value, coordinates+"."+f.key)
 		}
 	}
 }
@@ -141,13 +141,12 @@ func (f *freshEntities) get(coordinates, identity string) *Object {
 // overlay overlays source onto a copy of target, field by field.
 func overlay(target, source *Object) *Object {
 	result := shallowCopy(target)
-	for _, key := range source.keys {
-		value := source.values[key]
-		existing := result.values[key]
-		if sourceObject, ok := value.(*Object); ok && sourceObject != nil && isObject(existing) {
-			result.Set(key, overlay(existing.(*Object), sourceObject))
+	for _, f := range source.fields {
+		existing := result.value(f.key)
+		if sourceObject, ok := f.value.(*Object); ok && sourceObject != nil && isObject(existing) {
+			result.Set(f.key, overlay(existing.(*Object), sourceObject))
 		} else {
-			result.Set(key, value)
+			result.Set(f.key, f.value)
 		}
 	}
 	return result
@@ -210,12 +209,12 @@ func patchWithFresh(value any, coordinates string, context *mergeContext) (any, 
 			}
 		}
 
-		for _, key := range patched.keys {
-			child, err := patchWithFresh(patched.values[key], coordinates+"."+key, context)
+		for i := range patched.fields {
+			child, err := patchWithFresh(patched.fields[i].value, coordinates+"."+patched.fields[i].key, context)
 			if err != nil {
 				return nil, err
 			}
-			patched.values[key] = child
+			patched.fields[i].value = child
 		}
 
 		return patched, nil
@@ -239,8 +238,8 @@ func recordFresh(value any, coordinates string, context *mergeContext) {
 		if identity, ok := getEntityIdentity(v); ok && !isLinkStub(v) {
 			context.fresh.add(coordinates, identity, v)
 		}
-		for _, key := range v.keys {
-			recordFresh(v.values[key], coordinates+"."+key, context)
+		for _, f := range v.fields {
+			recordFresh(f.value, coordinates+"."+f.key, context)
 		}
 	}
 }
@@ -282,8 +281,8 @@ func sameShape(target, source *Object) bool {
 }
 
 func allMarkerKeys(object *Object) bool {
-	for _, key := range object.keys {
-		if !isMarkerKey(key) {
+	for _, f := range object.fields {
+		if !isMarkerKey(f.key) {
 			return false
 		}
 	}
@@ -394,13 +393,12 @@ func mergeData(target, source any, coordinates string, context *mergeContext, re
 			}
 		}
 
-		for _, key := range s.keys {
-			existing := base.values[key]
-			merged, err := mergeData(existing, s.values[key], coordinates+"."+key, context, record)
+		for _, f := range s.fields {
+			merged, err := mergeData(base.value(f.key), f.value, coordinates+"."+f.key, context, record)
 			if err != nil {
 				return nil, err
 			}
-			base.Set(key, merged)
+			base.Set(f.key, merged)
 		}
 
 		if identity, ok := getEntityIdentity(s); ok && !isLinkStub(s) {
@@ -482,12 +480,12 @@ func mergeResolvedEntities(data *Object, coordinates string, resolved any, conte
 
 		if object, ok := container.(*Object); ok && object != nil {
 			field := fields[depth]
-			if value, ok := object.values[field]; ok {
-				visited, err := visit(value, depth+1)
+			if i := object.index(field); i >= 0 {
+				visited, err := visit(object.fields[i].value, depth+1)
 				if err != nil {
 					return nil, err
 				}
-				object.values[field] = visited
+				object.fields[i].value = visited
 			}
 		}
 
@@ -514,20 +512,20 @@ func mergeExecutionData(data, nextData *Object, context *mergeContext, expectati
 	}
 	var resolutions []resolution
 
-	for _, key := range nextData.keys {
-		if isCacheAliasName(key) {
-			coordinates, err := parseCacheResolverAlias(key)
+	for _, f := range nextData.fields {
+		if isCacheAliasName(f.key) {
+			coordinates, err := parseCacheResolverAlias(f.key)
 			if err != nil {
 				return nil, err
 			}
 			resolutions = append(resolutions, resolution{
 				coordinates: coordinates,
-				value:       nextData.values[key],
-				alias:       key,
+				value:       f.value,
+				alias:       f.key,
 				depth:       strings.Count(coordinates, ".") + 1,
 			})
 		} else {
-			plain.Set(key, nextData.values[key])
+			plain.Set(f.key, f.value)
 		}
 	}
 

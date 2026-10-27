@@ -16,15 +16,29 @@ import (
  *   nil, bool, string, json.Number, []any, *Object
  */
 
-// Object is a JSON object that remembers the order of its keys.
+// Object is a JSON object that remembers the order of its keys. Objects in
+// GraphQL results are small, so keys are looked up linearly.
 type Object struct {
-	keys   []string
-	values map[string]any
+	fields []field
+}
+
+type field struct {
+	key   string
+	value any
 }
 
 // NewObject returns an empty object with room for n keys.
 func NewObject(n int) *Object {
-	return &Object{keys: make([]string, 0, n), values: make(map[string]any, n)}
+	return &Object{fields: make([]field, 0, n)}
+}
+
+func (o *Object) index(key string) int {
+	for i := range o.fields {
+		if o.fields[i].key == key {
+			return i
+		}
+	}
+	return -1
 }
 
 // Get returns the value of key, and whether the object has the key.
@@ -32,47 +46,51 @@ func (o *Object) Get(key string) (any, bool) {
 	if o == nil {
 		return nil, false
 	}
-	value, ok := o.values[key]
-	return value, ok
+	if i := o.index(key); i >= 0 {
+		return o.fields[i].value, true
+	}
+	return nil, false
+}
+
+// value returns the value of key, or nil.
+func (o *Object) value(key string) any {
+	if i := o.index(key); i >= 0 {
+		return o.fields[i].value
+	}
+	return nil
 }
 
 // Has reports whether the object has key.
 func (o *Object) Has(key string) bool {
-	if o == nil {
-		return false
-	}
-	_, ok := o.values[key]
-	return ok
+	return o != nil && o.index(key) >= 0
 }
 
 // Set sets the value of key, appending the key if it is new.
 func (o *Object) Set(key string, value any) {
-	if _, ok := o.values[key]; !ok {
-		o.keys = append(o.keys, key)
+	if i := o.index(key); i >= 0 {
+		o.fields[i].value = value
+		return
 	}
-	o.values[key] = value
+	o.fields = append(o.fields, field{key: key, value: value})
 }
 
 // Delete removes key.
 func (o *Object) Delete(key string) {
-	if _, ok := o.values[key]; !ok {
-		return
-	}
-	delete(o.values, key)
-	for i, k := range o.keys {
-		if k == key {
-			o.keys = append(o.keys[:i:i], o.keys[i+1:]...)
-			return
-		}
+	if i := o.index(key); i >= 0 {
+		o.fields = append(o.fields[:i:i], o.fields[i+1:]...)
 	}
 }
 
-// Keys returns the keys in order. The slice must not be modified.
+// Keys returns the keys in order.
 func (o *Object) Keys() []string {
 	if o == nil {
 		return nil
 	}
-	return o.keys
+	keys := make([]string, len(o.fields))
+	for i, f := range o.fields {
+		keys[i] = f.key
+	}
+	return keys
 }
 
 // Len returns the number of keys.
@@ -80,7 +98,7 @@ func (o *Object) Len() int {
 	if o == nil {
 		return 0
 	}
-	return len(o.keys)
+	return len(o.fields)
 }
 
 // MarshalJSON encodes the object with its keys in order.
@@ -148,9 +166,9 @@ func cloneData(value any) any {
 		if v == nil {
 			return v
 		}
-		out := NewObject(len(v.keys))
-		for _, key := range v.keys {
-			out.Set(key, cloneData(v.values[key]))
+		out := &Object{fields: make([]field, len(v.fields))}
+		for i, f := range v.fields {
+			out.fields[i] = field{key: f.key, value: cloneData(f.value)}
 		}
 		return out
 	default:
@@ -164,14 +182,10 @@ func cloneObject(o *Object) *Object {
 
 // shallowCopy returns a copy of the object sharing its values.
 func shallowCopy(o *Object) *Object {
-	out := NewObject(o.Len())
 	if o == nil {
-		return out
+		return NewObject(0)
 	}
-	for _, key := range o.keys {
-		out.Set(key, o.values[key])
-	}
-	return out
+	return &Object{fields: append(make([]field, 0, len(o.fields)), o.fields...)}
 }
 
 // EncodeJSON encodes a value, keeping the order of object keys.
@@ -218,13 +232,13 @@ func encodeValue(buf *bytes.Buffer, value any) error {
 			return nil
 		}
 		buf.WriteByte('{')
-		for i, key := range v.keys {
+		for i, f := range v.fields {
 			if i > 0 {
 				buf.WriteByte(',')
 			}
-			encodeString(buf, key)
+			encodeString(buf, f.key)
 			buf.WriteByte(':')
-			if err := encodeValue(buf, v.values[key]); err != nil {
+			if err := encodeValue(buf, f.value); err != nil {
 				return err
 			}
 		}

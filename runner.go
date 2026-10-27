@@ -499,7 +499,7 @@ func (m *Mangrove) Execute(ctx context.Context, next Executor, request *Request)
 	if collect, ok := ctx.Value(entityCollectorKey{}).(func(EntityRecord)); ok {
 		// Lets live query implementations know which entities a result
 		// depends on.
-		for _, record := range processed.collectedEntities {
+		for _, record := range processed.entities() {
 			collect(record.Entity)
 		}
 	}
@@ -529,7 +529,7 @@ func (m *Mangrove) formatResult(
 	}
 
 	hit := cachedResult != nil
-	known, typenames := knownEntities(processed.collectedEntities)
+	known, typenames := knownEntities(processed.entities())
 	knownObject := NewObject(len(typenames))
 	for _, typename := range typenames {
 		ids := make([]any, len(known[typename]))

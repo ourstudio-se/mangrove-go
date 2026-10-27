@@ -51,22 +51,24 @@ func makeLinkCollector(snapshots *entitySnapshots, linkCoordinates map[string]bo
 					return
 				}
 
-				for _, key := range v.keys {
-					walk(v.values[key], coordinates+"."+key)
+				for _, f := range v.fields {
+					walk(f.value, coordinates+"."+f.key)
 				}
 			}
 		}
 
-		for _, key := range data.Keys() {
-			coordinates := rootQuery + "." + key
-			if isCacheAliasName(key) {
-				parsed, err := parseCacheResolverAlias(key)
-				if err != nil {
-					return nil, err
+		if data != nil {
+			for _, f := range data.fields {
+				coordinates := rootQuery + "." + f.key
+				if isCacheAliasName(f.key) {
+					parsed, err := parseCacheResolverAlias(f.key)
+					if err != nil {
+						return nil, err
+					}
+					coordinates = parsed
 				}
-				coordinates = parsed
+				walk(f.value, coordinates)
 			}
-			walk(data.values[key], coordinates)
 		}
 
 		out := make([]linkGroup, len(groups))

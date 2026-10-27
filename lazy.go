@@ -1,6 +1,7 @@
 package mangrove
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,60 +45,111 @@ type lazyCacheState struct {
 	version string
 }
 
+// storedEnvelope is the metadata of a stored result:
+// {"v":2,"expiresAt":…,"version":…,"opaque":[…],"result":{"data":…,"errors":…}}.
 type storedEnvelope struct {
-	V         int    `json:"v"`
-	ExpiresAt int64  `json:"expiresAt"`
-	Version   string `json:"version"`
+	V         int
+	ExpiresAt int64
+	// Version identifies this stored copy. Entity sets vouch for specific
+	// versions, so that one request's memberships never vouch for another
+	// request's data.
+	Version string
 	// Opaque are the coordinates holding objects that aren't identifiable
 	// entities.
-	Opaque []string     `json:"opaque"`
-	Result storedResult `json:"result"`
+	Opaque []string
 }
 
-type storedResult struct {
-	Data   json.RawMessage `json:"data"`
-	Errors gqlerror.List   `json:"errors,omitempty"`
-}
-
-type storedReference struct {
-	// I is the entity id, or nil for entities identified by typename alone.
-	I *string    `json:"i"`
-	P []PathPart `json:"p"`
-	T string     `json:"t"`
-}
-
-func parseEnvelope(serialized string) (*storedEnvelope, *CachedResult, error) {
-	var raw struct {
-		V         *int            `json:"v"`
-		ExpiresAt *int64          `json:"expiresAt"`
-		Version   *string         `json:"version"`
-		Opaque    []string        `json:"opaque"`
-		Result    json.RawMessage `json:"result"`
+func jsonInt(value any) (int64, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
 	}
-	if err := json.Unmarshal([]byte(serialized), &raw); err != nil {
+	n, err := number.Int64()
+	return n, err == nil
+}
+
+// parseEnvelope decodes a stored result in a single pass. It returns nil
+// for anything that isn't a valid envelope.
+func parseEnvelope(serialized string) (*storedEnvelope, *CachedResult, error) {
+	decoded, err := DecodeJSON([]byte(serialized))
+	if err != nil {
 		return nil, nil, err
 	}
-	if raw.V == nil || *raw.V != 2 || raw.ExpiresAt == nil || raw.Version == nil || raw.Opaque == nil || len(raw.Result) == 0 || raw.Result[0] != '{' {
+	envelope := asObject(decoded)
+	if envelope == nil {
 		return nil, nil, nil
 	}
-	var result storedResult
-	if err := json.Unmarshal(raw.Result, &result); err != nil {
-		return nil, nil, err
+
+	v, ok := jsonInt(envelope.value("v"))
+	if !ok || v != 2 {
+		return nil, nil, nil
 	}
-	cached := &CachedResult{Errors: result.Errors}
-	if len(result.Data) > 0 {
-		data, err := DecodeJSON(result.Data)
+	expiresAt, ok := jsonInt(envelope.value("expiresAt"))
+	if !ok {
+		return nil, nil, nil
+	}
+	version, ok := envelope.value("version").(string)
+	if !ok {
+		return nil, nil, nil
+	}
+	opaqueList, ok := envelope.value("opaque").([]any)
+	if !ok {
+		return nil, nil, nil
+	}
+	opaque := make([]string, 0, len(opaqueList))
+	for _, coordinates := range opaqueList {
+		c, ok := coordinates.(string)
+		if !ok {
+			return nil, nil, nil
+		}
+		opaque = append(opaque, c)
+	}
+	result := asObject(envelope.value("result"))
+	if result == nil {
+		return nil, nil, nil
+	}
+
+	cached := &CachedResult{Data: asObject(result.value("data"))}
+	if errorsValue := result.value("errors"); errorsValue != nil {
+		encoded, err := EncodeJSON(errorsValue)
 		if err != nil {
 			return nil, nil, err
 		}
-		cached.Data = asObject(data)
+		if err := json.Unmarshal(encoded, &cached.Errors); err != nil {
+			return nil, nil, err
+		}
 	}
-	return &storedEnvelope{
-		V:         2,
-		ExpiresAt: *raw.ExpiresAt,
-		Version:   *raw.Version,
-		Opaque:    raw.Opaque,
-	}, cached, nil
+
+	return &storedEnvelope{V: 2, ExpiresAt: expiresAt, Version: version, Opaque: opaque}, cached, nil
+}
+
+func encodeEnvelope(expiresAt int64, version string, opaque []string, data any, errs gqlerror.List) (string, error) {
+	var buf bytes.Buffer
+	buf.WriteString(`{"v":2,"expiresAt":`)
+	buf.WriteString(strconv.FormatInt(expiresAt, 10))
+	buf.WriteString(`,"version":`)
+	encodeString(&buf, version)
+	buf.WriteString(`,"opaque":[`)
+	for i, coordinates := range opaque {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		encodeString(&buf, coordinates)
+	}
+	buf.WriteString(`],"result":{"data":`)
+	if err := encodeValue(&buf, data); err != nil {
+		return "", err
+	}
+	if len(errs) > 0 {
+		encoded, err := json.Marshal(errs)
+		if err != nil {
+			return "", err
+		}
+		buf.WriteString(`,"errors":`)
+		buf.Write(encoded)
+	}
+	buf.WriteString(`}}`)
+	return buf.String(), nil
 }
 
 const base36 = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -118,30 +170,112 @@ func versionMember(cacheKey, version string) string {
 	return cacheKey + "@" + version
 }
 
-func serializeReference(entity EntityRecord, path []PathPart) (string, error) {
-	encoded, err := json.Marshal(storedReference{I: entity.ID, P: path, T: entity.Typename})
-	if err != nil {
-		return "", err
+// serializeReference encodes an entity reference as JSON:
+// {"i":id|null,"p":[{"field":…,"index":…,"typename":…,"id":…}],"t":typename}.
+func serializeReference(entity EntityRecord, path []PathPart) string {
+	var buf bytes.Buffer
+	buf.WriteString(`{"i":`)
+	if entity.ID == nil {
+		buf.WriteString("null")
+	} else {
+		encodeString(&buf, *entity.ID)
 	}
-	return string(encoded), nil
+	buf.WriteString(`,"p":[`)
+	for i, part := range path {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString(`{"field":`)
+		encodeString(&buf, part.Field)
+		if part.Index != nil {
+			buf.WriteString(`,"index":`)
+			buf.WriteString(strconv.Itoa(*part.Index))
+		}
+		if part.Typename != "" {
+			buf.WriteString(`,"typename":`)
+			encodeString(&buf, part.Typename)
+		}
+		if part.ID != nil {
+			buf.WriteString(`,"id":`)
+			encodeString(&buf, *part.ID)
+		}
+		buf.WriteByte('}')
+	}
+	buf.WriteString(`],"t":`)
+	encodeString(&buf, entity.Typename)
+	buf.WriteByte('}')
+	return buf.String()
 }
 
 func parseReference(serialized string) (entityCacheResult, error) {
-	var reference struct {
-		I *string    `json:"i"`
-		P []PathPart `json:"p"`
-		T *string    `json:"t"`
-	}
-	if err := json.Unmarshal([]byte(serialized), &reference); err != nil {
-		return entityCacheResult{}, err
-	}
-	if reference.T == nil || len(reference.P) == 0 {
+	invalid := func() (entityCacheResult, error) {
 		return entityCacheResult{}, fmt.Errorf("invalid entity reference %s", serialized)
 	}
+
+	decoded, err := DecodeJSON([]byte(serialized))
+	if err != nil {
+		return entityCacheResult{}, err
+	}
+	reference := asObject(decoded)
+	if reference == nil {
+		return invalid()
+	}
+
+	typename, ok := reference.value("t").(string)
+	if !ok {
+		return invalid()
+	}
+	parts, ok := reference.value("p").([]any)
+	if !ok || len(parts) == 0 {
+		return invalid()
+	}
+
+	var id *string
+	switch i := reference.value("i").(type) {
+	case nil:
+	case string:
+		id = &i
+	default:
+		return invalid()
+	}
+
+	path := make([]PathPart, len(parts))
+	for n, p := range parts {
+		part := asObject(p)
+		if part == nil {
+			return invalid()
+		}
+		fieldName, ok := part.value("field").(string)
+		if !ok {
+			return invalid()
+		}
+		path[n].Field = fieldName
+		if value, ok := part.Get("index"); ok {
+			index, ok := jsonInt(value)
+			if !ok {
+				return invalid()
+			}
+			i := int(index)
+			path[n].Index = &i
+		}
+		if value, ok := part.Get("typename"); ok {
+			if path[n].Typename, ok = value.(string); !ok {
+				return invalid()
+			}
+		}
+		if value, ok := part.Get("id"); ok {
+			partID, ok := value.(string)
+			if !ok {
+				return invalid()
+			}
+			path[n].ID = &partID
+		}
+	}
+
 	return entityCacheResult{
 		EntityWithLocation: EntityWithLocation{
-			Entity: EntityRecord{Typename: *reference.T, ID: reference.I},
-			Path:   reference.P,
+			Entity: EntityRecord{Typename: typename, ID: id},
+			Path:   path,
 		},
 	}, nil
 }
@@ -403,17 +537,7 @@ func (s *LazyStrategy) StoreExecutionResult(ctx context.Context, params StorePar
 	if params.Result.Data != nil {
 		data = params.Result.Data
 	}
-	encodedData, err := EncodeJSON(data)
-	if err != nil {
-		return err
-	}
-	envelope, err := json.Marshal(storedEnvelope{
-		V:         2,
-		ExpiresAt: expiresAt,
-		Version:   version,
-		Opaque:    collectOpaqueCoordinates(data),
-		Result:    storedResult{Data: encodedData, Errors: params.Result.Errors},
-	})
+	envelope, err := encodeEnvelope(expiresAt, version, collectOpaqueCoordinates(data), data, params.Result.Errors)
 	if err != nil {
 		return err
 	}
@@ -443,10 +567,7 @@ func (s *LazyStrategy) StoreExecutionResult(ctx context.Context, params StorePar
 			existing.memberTTL = entityTTL
 		}
 
-		reference, err := serializeReference(collected.Entity, collected.Path)
-		if err != nil {
-			return err
-		}
+		reference := serializeReference(collected.Entity, collected.Path)
 		if !seenReferences[reference] {
 			seenReferences[reference] = true
 			references = append(references, reference)
@@ -514,7 +635,7 @@ func (s *LazyStrategy) StoreExecutionResult(ctx context.Context, params StorePar
 	if err := pipe.AddMembersToSet(ctx, operationKey, referenceMembers, AddMembersOptions{}); err != nil {
 		return err
 	}
-	if err := pipe.Set(ctx, s.buildResultKey(params.CacheKey), string(envelope), durationMs(remaining)); err != nil {
+	if err := pipe.Set(ctx, s.buildResultKey(params.CacheKey), envelope, durationMs(remaining)); err != nil {
 		return err
 	}
 
