@@ -1,0 +1,32 @@
+directive @cacheResolver(keyArg: String) on FIELD_DEFINITION
+directive @cacheEntity(ttl: Int) on OBJECT
+
+type Query {
+  items(first: Int): [Item!]!
+  item(id: ID!): Item @cacheResolver
+  owner(id: ID!): Owner @cacheResolver
+  node(id: ID!): Node @cacheResolver
+  search: [SearchResult!]!
+}
+
+type Mutation {
+  rename(id: ID!, name: String!): Item!
+}
+
+interface Node {
+  id: ID!
+}
+
+union SearchResult = Item | Owner
+
+type Item implements Node {
+  id: ID!
+  name: String!
+  owner: Owner!
+  secret: String
+}
+
+type Owner implements Node @cacheEntity(ttl: 60000) {
+  id: ID!
+  name: String!
+}

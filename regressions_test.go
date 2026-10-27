@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"testing"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/ourstudio-se/mangrove-go"

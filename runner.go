@@ -138,6 +138,9 @@ func New(options Options) (*Mangrove, error) {
 	}
 	if m.getDocumentString == nil {
 		m.getDocumentString = func(request *Request) string {
+			if request.DocumentString != "" {
+				return request.DocumentString
+			}
 			return m.printed.get(request.Document, PrintDocument)
 		}
 	}

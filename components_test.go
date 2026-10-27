@@ -187,4 +187,3 @@ func TestNoAliasConventionConflictsRule(t *testing.T) {
 		fragment F on Query { _ENTITY_x: a }
 		{ ...F b { _ENTITY_y: c } }`), 2)
 }
-

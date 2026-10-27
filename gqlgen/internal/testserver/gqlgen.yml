@@ -1,0 +1,23 @@
+schema:
+  - schema.graphqls
+exec:
+  filename: generated.go
+  package: testserver
+model:
+  filename: models_gen.go
+  package: testserver
+resolver:
+  layout: single-file
+  filename: resolver.go
+  package: testserver
+  type: Resolver
+directives:
+  cacheResolver:
+    skip_runtime: true
+  cacheEntity:
+    skip_runtime: true
+models:
+  Item:
+    fields:
+      owner:
+        resolver: true

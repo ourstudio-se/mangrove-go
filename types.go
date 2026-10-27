@@ -99,9 +99,12 @@ type CachedResult struct {
 
 // Request is an operation to execute.
 type Request struct {
-	Document      *ast.QueryDocument
-	OperationName string
-	Variables     map[string]any
+	Document *ast.QueryDocument
+	// DocumentString is the source text of Document, if known. It is used
+	// for the cache key instead of printing the document.
+	DocumentString string
+	OperationName  string
+	Variables      map[string]any
 	// Extensions of the request, passed on to the executor. Mangrove drops
 	// the persisted query extension for the documents it generates.
 	Extensions map[string]any
