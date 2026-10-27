@@ -157,6 +157,8 @@ srv.Use(mangrovegql.New(mangrove.Options{
 
 The extension intercepts queries. Mangrove's generated documents (partial queries, cache resolutions and link queries) run through the rest of the server's operation middleware and field middleware, like any other operation. Mutations, subscriptions, introspection and operations using `@defer` or `@stream` are executed as usual.
 
+Register the extension after other extensions and middleware: response middleware registered before it sees each request's final response (cache hits included), and Mangrove's errors pass through the server's error presenter. Response middleware also runs for every generated document. Generated documents are validated with the standard rules; set the extension's `ValidationRules` if your server uses different ones.
+
 Invalidate entities through the strategy:
 
 ```go
