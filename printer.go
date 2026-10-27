@@ -51,24 +51,7 @@ func (p *printer) operation(operation *ast.OperationDefinition) {
 			p.WriteByte(' ')
 			p.WriteString(operation.Name)
 		}
-		if len(operation.VariableDefinitions) > 0 {
-			p.WriteByte('(')
-			for i, definition := range operation.VariableDefinitions {
-				if i > 0 {
-					p.WriteString(", ")
-				}
-				p.WriteByte('$')
-				p.WriteString(definition.Variable)
-				p.WriteString(": ")
-				p.WriteString(definition.Type.String())
-				if definition.DefaultValue != nil {
-					p.WriteString(" = ")
-					p.value(definition.DefaultValue)
-				}
-				p.directives(definition.Directives)
-			}
-			p.WriteByte(')')
-		}
+		p.variableDefinitions(operation.VariableDefinitions)
 		p.directives(operation.Directives)
 		p.WriteByte(' ')
 	}
@@ -78,6 +61,7 @@ func (p *printer) operation(operation *ast.OperationDefinition) {
 func (p *printer) fragment(fragment *ast.FragmentDefinition) {
 	p.WriteString("fragment ")
 	p.WriteString(fragment.Name)
+	p.variableDefinitions(fragment.VariableDefinition)
 	p.WriteString(" on ")
 	p.WriteString(fragment.TypeCondition)
 	p.directives(fragment.Directives)
@@ -220,4 +204,26 @@ func writeGraphQLString(b *strings.Builder, s string) {
 		}
 	}
 	b.WriteByte('"')
+}
+
+func (p *printer) variableDefinitions(definitions ast.VariableDefinitionList) {
+	if len(definitions) == 0 {
+		return
+	}
+	p.WriteByte('(')
+	for i, definition := range definitions {
+		if i > 0 {
+			p.WriteString(", ")
+		}
+		p.WriteByte('$')
+		p.WriteString(definition.Variable)
+		p.WriteString(": ")
+		p.WriteString(definition.Type.String())
+		if definition.DefaultValue != nil {
+			p.WriteString(" = ")
+			p.value(definition.DefaultValue)
+		}
+		p.directives(definition.Directives)
+	}
+	p.WriteByte(')')
 }

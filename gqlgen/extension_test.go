@@ -20,6 +20,7 @@ import (
 	"github.com/ourstudio-se/mangrove-go/gqlgen"
 	"github.com/ourstudio-se/mangrove-go/gqlgen/internal/testserver"
 	"github.com/ourstudio-se/mangrove-go/memorycache"
+	"github.com/vektah/gqlparser/v2/gqlerror"
 )
 
 type server struct {
@@ -37,6 +38,9 @@ type serverOptions struct {
 	// hideSecrets makes field middleware hide Item.secret unless the request
 	// has the "X-Allowed: yes" header.
 	hideSecrets bool
+	// responses records the responses seen by response middleware
+	// registered before Mangrove.
+	responses *[]string
 }
 
 func newServer(t *testing.T, options serverOptions) *server {
@@ -47,6 +51,19 @@ func newServer(t *testing.T, options serverOptions) *server {
 	srv := handler.New(testserver.NewExecutableSchema(testserver.Config{Resolvers: &testserver.Resolver{Store: store}}))
 	srv.AddTransport(transport.POST{})
 	srv.Use(extension.Introspection{})
+	srv.SetErrorPresenter(func(ctx context.Context, err error) *gqlerror.Error {
+		presented := graphql.DefaultErrorPresenter(ctx, err)
+		presented.Extensions = map[string]any{"presented": true}
+		return presented
+	})
+	if options.responses != nil {
+		srv.AroundResponses(func(ctx context.Context, next graphql.ResponseHandler) *graphql.Response {
+			graphql.RegisterExtension(ctx, "traced", true)
+			response := next(ctx)
+			*options.responses = append(*options.responses, string(response.Data))
+			return response
+		})
+	}
 	srv.AroundFields(func(ctx context.Context, next graphql.Resolver) (any, error) {
 		field := graphql.GetFieldContext(ctx)
 		s.fieldsMu.Lock()
@@ -235,6 +252,51 @@ func TestExtension(t *testing.T) {
 		expectJSON(t, result.Data, `{"items":[{"id":"1"},{"id":"2"}]}`)
 		cache = s.query(`{ items { id } }`).Extensions["cache"].(map[string]any)
 		expectEqual(t, cache["hit"], true)
+	})
+
+	t.Run("response middleware registered before Mangrove sees final responses", func(t *testing.T) {
+		var responses []string
+		s := newServer(t, serverOptions{responses: &responses})
+		query := `{ items { id owner { id name } } }`
+		want := `{"items":[{"id":"1","owner":{"id":"o1","name":"Ann"}},{"id":"2","owner":{"id":"o2","name":"Bob"}}]}`
+
+		miss := s.query(query)
+		expectJSON(t, miss.Data, want)
+		expectEqual(t, miss.Extensions["traced"], true)
+		hit := s.query(query)
+		expectEqual(t, hit.Extensions["traced"], true)
+
+		s.store.SetOwnerName("o1", "Anna")
+		s.invalidate(mangrove.Entity("Owner", "o1"))
+		partial := s.query(query)
+		expectEqual(t, partial.Extensions["traced"], true)
+
+		// Each request's final response, without marker fields or Mangrove's
+		// aliases. (Generated documents pass through it as well.)
+		final := []string{want, want, strings.Replace(want, "Ann", "Anna", 1)}
+		for _, response := range final {
+			found := false
+			for _, seen := range responses {
+				if seen == response {
+					found = true
+				}
+				if strings.Contains(seen, "__entityCache") && seen == response {
+					t.Fatalf("marker fields in %s", seen)
+				}
+			}
+			if !found {
+				t.Fatalf("response middleware didn't see %s, saw %v", response, responses)
+			}
+		}
+	})
+
+	t.Run("Mangrove's errors pass through the error presenter", func(t *testing.T) {
+		s := newServer(t, serverOptions{})
+		// Conflicts with the id marker Mangrove adds.
+		result := s.query(`{ item(id: "1") { __entityCacheId: name } }`)
+		expectEqual(t, len(result.Errors), 1)
+		presented := result.Errors[0].(map[string]any)["extensions"].(map[string]any)["presented"]
+		expectEqual(t, presented, true)
 	})
 
 	t.Run("invalid documents are rejected before Mangrove sees them", func(t *testing.T) {

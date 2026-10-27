@@ -26,27 +26,11 @@ func isQueryOnlyDocument(document *ast.QueryDocument) bool {
 	return true
 }
 
-// isDecorated reports whether a document was decorated already. Every
-// decorated operation selects the typename marker at its root, which
-// servers that cache parsed documents may feed through the decorator again.
-func isDecorated(document *ast.QueryDocument) bool {
-	if len(document.Operations) == 0 {
-		return false
-	}
-	for _, operation := range document.Operations {
-		found := false
-		for _, selection := range operation.SelectionSet {
-			if field, ok := selection.(*ast.Field); ok && field.Alias == AliasEntityCacheTypename && field.Name == "__typename" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
+// decoratedDocuments holds the documents produced by the decorators.
+// Servers may cache parsed documents and feed them through the decorator
+// again, so decorating must be idempotent. Documents are recognized by
+// identity: a client can select the marker fields itself.
+var decoratedDocuments weakSet[ast.QueryDocument]
 
 type schemaDecorator struct {
 	schema            *ast.Schema
@@ -55,7 +39,14 @@ type schemaDecorator struct {
 }
 
 func (d *schemaDecorator) decorate(document *ast.QueryDocument) *ast.QueryDocument {
-	return d.memo.get(document, d.decorateDocument)
+	if decoratedDocuments.has(document) || !isQueryOnlyDocument(document) {
+		return document
+	}
+	return d.memo.get(document, func(document *ast.QueryDocument) *ast.QueryDocument {
+		decorated := d.decorateDocument(document)
+		decoratedDocuments.add(decorated)
+		return decorated
+	})
 }
 
 // schemaIDSelection is the id marker for idField of a type, typed after the
@@ -150,10 +141,6 @@ func rootType(schema *ast.Schema, operation ast.Operation) *ast.Definition {
 }
 
 func (d *schemaDecorator) decorateDocument(document *ast.QueryDocument) *ast.QueryDocument {
-	if isDecorated(document) || !isQueryOnlyDocument(document) {
-		return document
-	}
-
 	decorated := &ast.QueryDocument{Position: document.Position, Comment: document.Comment}
 
 	for _, operation := range document.Operations {
@@ -178,7 +165,14 @@ var clientDecorations weakMemo[ast.QueryDocument, *ast.QueryDocument]
 // of an entity with `@idField`. Use it when wrapping an executor that runs
 // against a remote schema. It is idempotent.
 func DecorateClientDocument(document *ast.QueryDocument) *ast.QueryDocument {
-	return clientDecorations.get(document, decorateClientDocument)
+	if decoratedDocuments.has(document) {
+		return document
+	}
+	return clientDecorations.get(document, func(document *ast.QueryDocument) *ast.QueryDocument {
+		decorated := decorateClientDocument(document)
+		decoratedDocuments.add(decorated)
+		return decorated
+	})
 }
 
 func withoutIDFieldDirective(directives ast.DirectiveList) ast.DirectiveList {
@@ -235,10 +229,6 @@ func decorateClientSelectionSet(selectionSet ast.SelectionSet, decorate bool) as
 }
 
 func decorateClientDocument(document *ast.QueryDocument) *ast.QueryDocument {
-	if isDecorated(document) {
-		return document
-	}
-
 	decorate := isQueryOnlyDocument(document)
 	decorated := &ast.QueryDocument{Position: document.Position, Comment: document.Comment}
 

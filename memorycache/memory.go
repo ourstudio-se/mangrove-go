@@ -58,7 +58,7 @@ func New(options Options) *Cache {
 		sweepInterval:      options.SweepInterval,
 	}
 	if options.InvalidationWindow > 0 {
-		c.invalidationWindow = options.InvalidationWindow.Milliseconds()
+		c.invalidationWindow = ceilMs(options.InvalidationWindow)
 	}
 	if c.now == nil {
 		c.now = time.Now
@@ -166,7 +166,7 @@ func (c *Cache) addMembersToSet(key string, members []mangrove.Member, options m
 		if member.TTL <= 0 {
 			return &mangrove.CacheValidationError{Message: fmt.Sprintf("Member TTL must be positive, got %s", member.TTL)}
 		}
-		expiresAt := min(t+member.TTL.Milliseconds(), inheritedExpiry)
+		expiresAt := min(t+ceilMs(member.TTL), inheritedExpiry)
 		current, ok := set[member.Member]
 		if !ok || (!options.OnlyNew && expiresAt > current) {
 			set[member.Member] = expiresAt
@@ -211,7 +211,7 @@ func (c *Cache) set(key, data string, ttl time.Duration) error {
 		return &mangrove.CacheValidationError{Message: fmt.Sprintf("TTL must be positive, got %s", ttl)}
 	}
 	c.countWrite()
-	c.values[key] = expiring[string]{expiresAt: c.nowMs() + ttl.Milliseconds(), value: data}
+	c.values[key] = expiring[string]{expiresAt: c.nowMs() + ceilMs(ttl), value: data}
 	return nil
 }
 
@@ -384,7 +384,7 @@ func (p *pipe) Execute(context.Context) error {
 		if claimed, ok := live(c.claims, p.condition.Key, c.nowMs()); ok && claimed > p.condition.Epoch {
 			return nil
 		}
-		c.claims[p.condition.Key] = expiring[int64]{expiresAt: c.nowMs() + p.condition.TTL.Milliseconds(), value: p.condition.Epoch}
+		c.claims[p.condition.Key] = expiring[int64]{expiresAt: c.nowMs() + ceilMs(p.condition.TTL), value: p.condition.Epoch}
 	}
 
 	var firstErr error
@@ -394,4 +394,10 @@ func (p *pipe) Execute(context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+// ceilMs rounds a duration up to whole milliseconds, as the Redis cache
+// does.
+func ceilMs(d time.Duration) int64 {
+	return int64((d + time.Millisecond - 1) / time.Millisecond)
 }

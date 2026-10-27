@@ -20,7 +20,12 @@ import (
 // GraphQL results are small, so keys are looked up linearly.
 type Object struct {
 	fields []field
+	// byKey indexes fields by key, once an object has more than
+	// indexThreshold of them.
+	byKey map[string]int
 }
+
+const indexThreshold = 16
 
 type field struct {
 	key   string
@@ -33,6 +38,20 @@ func NewObject(n int) *Object {
 }
 
 func (o *Object) index(key string) int {
+	if len(o.fields) > indexThreshold {
+		if o.byKey == nil {
+			o.byKey = make(map[string]int, len(o.fields))
+			for i, f := range o.fields {
+				if _, ok := o.byKey[f.key]; !ok {
+					o.byKey[f.key] = i
+				}
+			}
+		}
+		if i, ok := o.byKey[key]; ok {
+			return i
+		}
+		return -1
+	}
 	for i := range o.fields {
 		if o.fields[i].key == key {
 			return i
@@ -71,6 +90,9 @@ func (o *Object) Set(key string, value any) {
 		o.fields[i].value = value
 		return
 	}
+	if o.byKey != nil {
+		o.byKey[key] = len(o.fields)
+	}
 	o.fields = append(o.fields, field{key: key, value: value})
 }
 
@@ -78,6 +100,7 @@ func (o *Object) Set(key string, value any) {
 func (o *Object) Delete(key string) {
 	if i := o.index(key); i >= 0 {
 		o.fields = append(o.fields[:i:i], o.fields[i+1:]...)
+		o.byKey = nil
 	}
 }
 
@@ -318,9 +341,13 @@ func DecodeJSON(data []byte) (any, error) {
 }
 
 type decoder struct {
-	data []byte
-	pos  int
+	data  []byte
+	pos   int
+	depth int
 }
+
+// maxDepth bounds the nesting of decoded values, as encoding/json does.
+const maxDepth = 10000
 
 var errUnexpectedEnd = errors.New("mangrove: unexpected end of JSON input")
 
@@ -344,9 +371,15 @@ func (d *decoder) value() (any, error) {
 		return nil, errUnexpectedEnd
 	}
 	switch c := d.data[d.pos]; {
-	case c == '{':
-		return d.object()
-	case c == '[':
+	case c == '{' || c == '[':
+		d.depth++
+		if d.depth > maxDepth {
+			return nil, d.errorf("exceeded max depth")
+		}
+		defer func() { d.depth-- }()
+		if c == '{' {
+			return d.object()
+		}
 		return d.array()
 	case c == '"':
 		return d.string()
@@ -384,7 +417,8 @@ func (d *decoder) number() (any, error) {
 		}
 		return n
 	}
-	if digits() == 0 {
+	integerStart := d.pos
+	if n := digits(); n == 0 || (n > 1 && d.data[integerStart] == '0') {
 		return nil, d.errorf("invalid number")
 	}
 	if d.pos < len(d.data) && d.data[d.pos] == '.' {
@@ -413,9 +447,10 @@ func (d *decoder) string() (string, error) {
 		switch c := d.data[d.pos]; {
 		case c == '"':
 			d.pos++
-			if !escaped {
+			if !escaped && utf8.Valid(d.data[start+1:d.pos-1]) {
 				return string(d.data[start+1 : d.pos-1]), nil
 			}
+			// encoding/json replaces invalid UTF-8, as the encoder does.
 			var s string
 			if err := json.Unmarshal(d.data[start:d.pos], &s); err != nil {
 				return "", err

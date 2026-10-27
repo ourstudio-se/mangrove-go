@@ -8,12 +8,15 @@
 // Queries are served from the cache. The documents Mangrove generates to
 // refresh cached results are executed through the rest of the server's
 // operation middleware and field middleware, like any other operation.
+// Response middleware registered before the extension sees the final
+// response.
 package gqlgen
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/handler/lru"
@@ -22,12 +25,15 @@ import (
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	"github.com/vektah/gqlparser/v2/parser"
 	"github.com/vektah/gqlparser/v2/validator"
-	// Registers the standard validation rules.
-	_ "github.com/vektah/gqlparser/v2/validator/rules"
+	"github.com/vektah/gqlparser/v2/validator/rules"
 )
 
 // Extension is a gqlgen handler extension that caches query results.
 type Extension struct {
+	// ValidationRules validate the documents Mangrove generates. Defaults to
+	// the standard rules. Set it to the server's rules if they differ.
+	ValidationRules *rules.Rules
+
 	options   mangrove.Options
 	mangrove  *mangrove.Mangrove
 	schema    *ast.Schema
@@ -37,6 +43,7 @@ type Extension struct {
 var (
 	_ graphql.HandlerExtension     = (*Extension)(nil)
 	_ graphql.OperationInterceptor = (*Extension)(nil)
+	_ graphql.ResponseInterceptor  = (*Extension)(nil)
 )
 
 // DocumentCacheSize is the number of generated documents kept parsed and
@@ -107,7 +114,15 @@ func hasIncrementalDelivery(selectionSet ast.SelectionSet, fragments ast.Fragmen
 	return false
 }
 
-// InterceptOperation serves queries through Mangrove.
+type pendingKey struct{}
+
+// pending is a query that Mangrove serves once its response is requested.
+type pending struct {
+	operationContext *graphql.OperationContext
+	next             graphql.OperationHandler
+}
+
+// InterceptOperation marks queries to be served by Mangrove.
 func (e *Extension) InterceptOperation(ctx context.Context, next graphql.OperationHandler) graphql.ResponseHandler {
 	operationContext := graphql.GetOperationContext(ctx)
 
@@ -120,28 +135,57 @@ func (e *Extension) InterceptOperation(ctx context.Context, next graphql.Operati
 		return next(ctx)
 	}
 
-	request := &mangrove.Request{
-		Document:       operationContext.Doc,
-		DocumentString: operationContext.RawQuery,
-		OperationName:  operationContext.OperationName,
-		Variables:      operationContext.Variables,
-		Extensions:     operationContext.Extensions,
+	return next(context.WithValue(ctx, pendingKey{}, &pending{operationContext: operationContext, next: next}))
+}
+
+// InterceptResponse serves marked queries through Mangrove, in place of
+// executing them. Response middleware registered before the extension sees
+// the final response (and Mangrove's errors pass through the server's error
+// presenter); register the extension after other response middleware.
+func (e *Extension) InterceptResponse(ctx context.Context, next graphql.ResponseHandler) *graphql.Response {
+	p, ok := ctx.Value(pendingKey{}).(*pending)
+	if !ok || ctx.Value(generatedKey{}) != nil {
+		return next(ctx)
 	}
 
-	response, err := e.mangrove.Execute(ctx, e.executor(operationContext, next), request)
+	request := &mangrove.Request{
+		Document:       p.operationContext.Doc,
+		DocumentString: p.operationContext.RawQuery,
+		OperationName:  p.operationContext.OperationName,
+		Variables:      p.operationContext.Variables,
+		Extensions:     p.operationContext.Extensions,
+	}
+
+	response, err := e.mangrove.Execute(ctx, e.executor(p, next), request)
 	if err != nil {
 		var list gqlerror.List
-		if !errors.As(err, &list) {
-			list = gqlerror.List{gqlerror.WrapIfUnwrapped(err)}
+		if errors.As(err, &list) {
+			for _, item := range list {
+				graphql.AddError(ctx, item)
+			}
+		} else {
+			graphql.AddError(ctx, err)
 		}
-		return graphql.OneShot(&graphql.Response{Errors: list})
+		return &graphql.Response{Errors: graphql.GetErrors(ctx), Extensions: graphql.GetExtensions(ctx)}
 	}
 
-	return graphql.OneShot(&graphql.Response{
+	extensions := graphql.GetExtensions(ctx)
+	if len(response.Extensions) > 0 {
+		merged := make(map[string]any, len(extensions)+len(response.Extensions))
+		for key, value := range response.Extensions {
+			merged[key] = value
+		}
+		for key, value := range extensions {
+			merged[key] = value
+		}
+		extensions = merged
+	}
+
+	return &graphql.Response{
 		Data:       response.Data,
-		Errors:     response.Errors,
-		Extensions: response.Extensions,
-	})
+		Errors:     append(response.Errors, graphql.GetErrors(ctx)...),
+		Extensions: extensions,
+	}
 }
 
 func (e *Extension) parse(ctx context.Context, query string) (*ast.QueryDocument, error) {
@@ -152,7 +196,7 @@ func (e *Extension) parse(ctx context.Context, query string) (*ast.QueryDocument
 	if err != nil {
 		return nil, gqlerror.List{gqlerror.WrapIfUnwrapped(err)}
 	}
-	if errs := validator.ValidateWithRules(e.schema, document, nil); len(errs) > 0 {
+	if errs := validator.ValidateWithRules(e.schema, document, e.ValidationRules); len(errs) > 0 {
 		return nil, errs
 	}
 	e.documents.Add(ctx, query, document)
@@ -161,14 +205,16 @@ func (e *Extension) parse(ctx context.Context, query string) (*ast.QueryDocument
 
 // executor runs documents through the rest of the operation middleware, as
 // operations of their own.
-func (e *Extension) executor(original *graphql.OperationContext, next graphql.OperationHandler) mangrove.Executor {
+func (e *Extension) executor(p *pending, original graphql.ResponseHandler) mangrove.Executor {
+	var usedOriginal atomic.Bool
 	return func(ctx context.Context, request *mangrove.Request) (*mangrove.Response, error) {
 		var handler graphql.ResponseHandler
 		innerCtx := ctx
 
-		if request.Document == original.Doc && request.OperationName == original.OperationName {
+		if request.Document == p.operationContext.Doc && request.OperationName == p.operationContext.OperationName &&
+			usedOriginal.CompareAndSwap(false, true) {
 			// The original operation, as gqlgen prepared it.
-			handler = next(ctx)
+			handler = original
 		} else {
 			query := mangrove.PrintDocument(request.Document)
 			document, err := e.parse(ctx, query)
@@ -181,6 +227,7 @@ func (e *Extension) executor(original *graphql.OperationContext, next graphql.Op
 				return nil, fmt.Errorf("mangrove: operation %q not found in generated document", request.OperationName)
 			}
 
+			original := p.operationContext
 			operationContext := &graphql.OperationContext{
 				RawQuery:               query,
 				Variables:              original.Variables,
@@ -197,7 +244,7 @@ func (e *Extension) executor(original *graphql.OperationContext, next graphql.Op
 			}
 
 			innerCtx = graphql.WithOperationContext(context.WithValue(ctx, generatedKey{}, true), operationContext)
-			handler = next(innerCtx)
+			handler = p.next(innerCtx)
 		}
 
 		response := handler(innerCtx)

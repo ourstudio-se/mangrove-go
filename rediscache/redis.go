@@ -247,7 +247,7 @@ func New(options Options) *Cache {
 		now:                options.Now,
 	}
 	if options.InvalidationWindow > 0 {
-		c.invalidationWindow = options.InvalidationWindow.Milliseconds()
+		c.invalidationWindow = ceilMs(options.InvalidationWindow)
 	}
 	if c.now == nil {
 		c.now = time.Now
@@ -290,8 +290,7 @@ type addBatch struct {
 }
 
 // recorder turns mutations into operations on a transaction. Every write is
-// a script, so that it can be made conditional, and so that a transaction
-// failing on a missing script applies nothing.
+// a script, so that it can be made conditional.
 type recorder struct {
 	cache      *Cache
 	operations []operation
@@ -454,8 +453,11 @@ func (p *pipe) Execute(ctx context.Context) error {
 	if !isNoScript(err) {
 		return err
 	}
-	// Scripts can disappear (SCRIPT FLUSH, failover). Nothing was applied,
-	// as every write is a script: load them and retry.
+	// Scripts can disappear (SCRIPT FLUSH, failover): load them and retry.
+	// Commands of a transaction that fail don't roll back the others, so
+	// writes that found their script were applied; running the whole pipe
+	// again is safe, as every operation is idempotent and the claim accepts
+	// the same epoch again.
 	if err := p.cache.LoadScripts(ctx); err != nil {
 		return err
 	}
